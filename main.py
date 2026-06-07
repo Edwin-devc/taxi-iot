@@ -1,13 +1,25 @@
 import time
 import csv
+import json
 import board
 import busio
 import serial
 import pynmea2
 from datetime import datetime
+from awscrt import mqtt
+from awsiot import mqtt_connection_builder
 from adafruit_ads1x15.ads1115 import ADS1115
 from adafruit_ads1x15.analog_in import AnalogIn
 from adafruit_ads1x15 import ads1x15
+
+# ── AWS IoT config ──────────────────────────────────────────
+ENDPOINT   = "a2yp03pyp0asxs-ats.iot.eu-north-1.amazonaws.com"
+CLIENT_ID  = "taxi-pi"
+TOPIC      = "taxi/occupancy"
+CERT       = "certs/78215a2780dd2b18e48d3a3bb39fcdbc372dbbdf8165ba6086a9680c9ef8d4a8-certificate.pem.crt"
+KEY        = "certs/78215a2780dd2b18e48d3a3bb39fcdbc372dbbdf8165ba6086a9680c9ef8d4a8-private.pem.key"
+CA         = "certs/AmazonRootCA1.pem"
+# ────────────────────────────────────────────────────────────
 
 i2c = busio.I2C(board.SCL, board.SDA)
 ads = ADS1115(i2c)
@@ -67,6 +79,41 @@ def log_to_csv(timestamp, lat, lon, states, readings):
             "OCCUPIED" if states["Seat 4"] else "empty", readings["Seat 4"],
         ])
 
+def publish_to_aws(mqtt_conn, timestamp, lat, lon, states, readings):
+    payload = {
+        "timestamp": timestamp,
+        "gps": {
+            "latitude": lat,
+            "longitude": lon,
+        },
+        "seats": {
+            name: {
+                "status": "OCCUPIED" if states[name] else "empty",
+                "voltage": round(readings[name], 3),
+            }
+            for name in channels
+        }
+    }
+    mqtt_conn.publish(
+        topic=TOPIC,
+        payload=json.dumps(payload),
+        qos=mqtt.QoS.AT_LEAST_ONCE,
+    )
+    print(f"  Published to AWS IoT: {TOPIC}")
+
+# Connect to AWS IoT
+print("Connecting to AWS IoT Core...")
+mqtt_conn = mqtt_connection_builder.mtls_from_path(
+    endpoint=ENDPOINT,
+    cert_filepath=CERT,
+    pri_key_filepath=KEY,
+    ca_filepath=CA,
+    client_id=CLIENT_ID,
+)
+connect_future = mqtt_conn.connect()
+connect_future.result()
+print("Connected to AWS IoT Core.")
+
 print("Monitoring seat occupancy...")
 print(f"Logging to: {LOG_FILE}")
 
@@ -87,7 +134,7 @@ while True:
             print(f"  [{status}] {name}: {readings[name]:.3f} V")
 
         log_to_csv(timestamp, lat, lon, current_states, readings)
-        print(f"  Logged to {LOG_FILE}")
+        publish_to_aws(mqtt_conn, timestamp, lat, lon, current_states, readings)
 
         previous_states = current_states.copy()
 
