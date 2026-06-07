@@ -6,5 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "adafruit-circuitpython-ads1x15>=3.0.4",
+    "pynmea2>=1.19.0",
+    "pyserial>=3.5",
     "rpi-gpio>=0.7.1",
 ]
