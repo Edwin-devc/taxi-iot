@@ -1,0 +1,10 @@
+[project]
+name = "taxi"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "adafruit-circuitpython-ads1x15>=3.0.4",
+    "rpi-gpio>=0.7.1",
+]
