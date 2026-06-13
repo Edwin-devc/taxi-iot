@@ -45,8 +45,14 @@ channels = {
 }
 
 THRESHOLD = 0.15
+# Calibration: volts → weight in kg (adjust WEIGHT_PER_VOLT to your load cell)
+WEIGHT_PER_VOLT = 50.0
 previous_states = {name: False for name in channels}
 LOG_FILE = "occupancy_log.csv"
+
+def voltage_to_weight(voltage: float) -> int:
+    """Convert ADC voltage to weight in kg (numeric 5,0)."""
+    return max(0, round(voltage * WEIGHT_PER_VOLT))
 
 def read_gps(port="/dev/ttyS0", baudrate=9600):
     try:
@@ -65,42 +71,33 @@ def read_gps(port="/dev/ttyS0", baudrate=9600):
     return None, None
 
 def log_to_csv(timestamp, lat, lon, states, readings):
+    location = f"{lat:.6f},{lon:.6f}" if lat is not None else "no fix"
     with csv_lock:
         file_exists = os.path.exists(LOG_FILE)
         with open(LOG_FILE, "a", newline="") as f:
             writer = csv.writer(f)
             if not file_exists:
+                writer.writerow(["weight", "is_occupied", "time_recorded", "location"])
+            for name in channels:
                 writer.writerow([
-                    "timestamp", "latitude", "longitude",
-                    "seat1_status", "seat1_voltage",
-                    "seat2_status", "seat2_voltage",
-                    "seat3_status", "seat3_voltage",
-                    "seat4_status", "seat4_voltage",
+                    voltage_to_weight(readings[name]),
+                    states[name],
+                    timestamp,
+                    location,
                 ])
-            writer.writerow([
-                timestamp,
-                lat if lat is not None else "",
-                lon if lon is not None else "",
-                "OCCUPIED" if states["Seat 1"] else "empty", readings["Seat 1"],
-                "OCCUPIED" if states["Seat 2"] else "empty", readings["Seat 2"],
-                "OCCUPIED" if states["Seat 3"] else "empty", readings["Seat 3"],
-                "OCCUPIED" if states["Seat 4"] else "empty", readings["Seat 4"],
-            ])
 
 def publish_to_aws(mqtt_conn, timestamp, lat, lon, states, readings):
+    location = f"{lat:.6f},{lon:.6f}" if lat is not None else "no fix"
     payload = {
-        "timestamp": timestamp,
-        "gps": {
-            "latitude": lat,
-            "longitude": lon,
-        },
-        "seats": {
-            name: {
-                "status": "OCCUPIED" if states[name] else "empty",
-                "voltage": round(readings[name], 3),
+        "seats": [
+            {
+                "weight": voltage_to_weight(readings[name]),
+                "is_occupied": states[name],
+                "time_recorded": timestamp,
+                "location": location,
             }
             for name in channels
-        }
+        ]
     }
     mqtt_conn.publish(
         topic=TOPIC,
