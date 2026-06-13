@@ -1,3 +1,4 @@
+import os
 import time
 import csv
 import json
@@ -5,7 +6,12 @@ import board
 import busio
 import serial
 import pynmea2
+import boto3
+import threading
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 from awscrt import mqtt
 from awsiot import mqtt_connection_builder
 from adafruit_ads1x15.ads1115 import ADS1115
@@ -19,7 +25,14 @@ TOPIC      = "taxi/occupancy"
 CERT       = "certs/78215a2780dd2b18e48d3a3bb39fcdbc372dbbdf8165ba6086a9680c9ef8d4a8-certificate.pem.crt"
 KEY        = "certs/78215a2780dd2b18e48d3a3bb39fcdbc372dbbdf8165ba6086a9680c9ef8d4a8-private.pem.key"
 CA         = "certs/AmazonRootCA1.pem"
+# ── S3 config ───────────────────────────────────────────────
+S3_BUCKET        = "taxi-pi"
+S3_PREFIX        = "taxi-logs/"
+S3_REGION        = "eu-north-1"
+UPLOAD_INTERVAL  = 300                     # seconds (5 minutes)
 # ────────────────────────────────────────────────────────────
+
+csv_lock = threading.Lock()
 
 i2c = busio.I2C(board.SCL, board.SDA)
 ads = ADS1115(i2c)
@@ -52,32 +65,27 @@ def read_gps(port="/dev/ttyS0", baudrate=9600):
     return None, None
 
 def log_to_csv(timestamp, lat, lon, states, readings):
-    file_exists = False
-    try:
-        with open(LOG_FILE, "r") as f:
-            file_exists = True
-    except FileNotFoundError:
-        pass
-
-    with open(LOG_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
+    with csv_lock:
+        file_exists = os.path.exists(LOG_FILE)
+        with open(LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow([
+                    "timestamp", "latitude", "longitude",
+                    "seat1_status", "seat1_voltage",
+                    "seat2_status", "seat2_voltage",
+                    "seat3_status", "seat3_voltage",
+                    "seat4_status", "seat4_voltage",
+                ])
             writer.writerow([
-                "timestamp", "latitude", "longitude",
-                "seat1_status", "seat1_voltage",
-                "seat2_status", "seat2_voltage",
-                "seat3_status", "seat3_voltage",
-                "seat4_status", "seat4_voltage",
+                timestamp,
+                lat if lat is not None else "",
+                lon if lon is not None else "",
+                "OCCUPIED" if states["Seat 1"] else "empty", readings["Seat 1"],
+                "OCCUPIED" if states["Seat 2"] else "empty", readings["Seat 2"],
+                "OCCUPIED" if states["Seat 3"] else "empty", readings["Seat 3"],
+                "OCCUPIED" if states["Seat 4"] else "empty", readings["Seat 4"],
             ])
-        writer.writerow([
-            timestamp,
-            lat if lat is not None else "",
-            lon if lon is not None else "",
-            "OCCUPIED" if states["Seat 1"] else "empty", readings["Seat 1"],
-            "OCCUPIED" if states["Seat 2"] else "empty", readings["Seat 2"],
-            "OCCUPIED" if states["Seat 3"] else "empty", readings["Seat 3"],
-            "OCCUPIED" if states["Seat 4"] else "empty", readings["Seat 4"],
-        ])
 
 def publish_to_aws(mqtt_conn, timestamp, lat, lon, states, readings):
     payload = {
@@ -100,6 +108,26 @@ def publish_to_aws(mqtt_conn, timestamp, lat, lon, states, readings):
         qos=mqtt.QoS.AT_LEAST_ONCE,
     )
     print(f"  Published to AWS IoT: {TOPIC}")
+
+def upload_csv_to_s3():
+    with csv_lock:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 0:
+            try:
+                s3 = boto3.client("s3", region_name=S3_REGION)
+                key = f"{S3_PREFIX}{datetime.now().strftime('%Y%m%d_%H%M%S')}_occupancy.csv"
+                s3.upload_file(LOG_FILE, S3_BUCKET, key)
+                os.remove(LOG_FILE)
+                print(f"  Uploaded CSV to s3://{S3_BUCKET}/{key} and deleted local copy.")
+            except Exception as e:
+                print(f"  S3 upload failed: {e}")
+
+    next_upload = threading.Timer(UPLOAD_INTERVAL, upload_csv_to_s3)
+    next_upload.daemon = True
+    next_upload.start()
+
+first_upload = threading.Timer(UPLOAD_INTERVAL, upload_csv_to_s3)
+first_upload.daemon = True
+first_upload.start()
 
 # Connect to AWS IoT
 print("Connecting to AWS IoT Core...")
